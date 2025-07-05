@@ -1,0 +1,123 @@
+version: '3.8'
+
+volumes:
+  db_storage:
+  n8n_storage:
+  n8n_binary_data:
+  redis_data:
+
+services:
+  postgres:
+    container_name: postgres
+    image: postgres:16
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${DB_POSTGRESDB_DATABASE}
+      DB_POSTGRESDB_USER: ${DB_POSTGRESDB_USER}
+      DB_POSTGRESDB_PASSWORD: ${DB_POSTGRESDB_PASSWORD}
+      DB_POSTGRESDB_DATABASE: ${DB_POSTGRESDB_DATABASE}
+    env_file:
+      - ./.env
+    volumes:
+      - db_storage:/var/lib/postgresql/data
+      - ./db/init_script.sh:/docker-entrypoint-initdb.d/init_script.sh
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ${DB_POSTGRESDB_DATABASE}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  n8n:
+    container_name: n8n
+    image: n8nio/n8n:1.101.1
+    user: root:root
+    restart: always
+    environment:
+      - DB_TYPE=${DB_TYPE}
+      - DB_POSTGRESDB_HOST=${DB_POSTGRESDB_HOST}
+      - DB_POSTGRESDB_PORT=${DB_POSTGRESDB_PORT}
+      - DB_POSTGRESDB_DATABASE=${DB_POSTGRESDB_DATABASE}
+      - DB_POSTGRESDB_USER=${DB_POSTGRESDB_USER}
+      - DB_POSTGRESDB_PASSWORD=${DB_POSTGRESDB_PASSWORD}
+      - QUEUE_BULL_REDIS_HOST=redis
+      - QUEUE_BULL_REDIS_PORT=${QUEUE_BULL_REDIS_PORT}
+      - QUEUE_BULL_REDIS_DB=${QUEUE_BULL_REDIS_DB}
+      - QUEUE_BULL_REDIS_PASSWORD=${QUEUE_BULL_REDIS_PASSWORD}
+    env_file:
+      - ./.env
+    ports:
+      - "5678:5678"
+    volumes:
+      - n8n_storage:/home/node/.n8n
+      - n8n_binary_data:/home/node/binaryData
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "/usr/bin/wget --server-response --proxy off --no-verbose --tries=1 --timeout=3 127.0.0.1:5678/healthz -O /dev/null 2>&1 | grep -q 'HTTP/1.1 200 OK'"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  n8n-worker:
+    container_name: worker1
+    image: n8nio/n8n:1.101.1
+    user: root:root
+    restart: always
+    command: worker
+    env_file:
+      - ./.env
+    volumes:
+      - n8n_storage:/home/node/.n8n
+      - n8n_binary_data:/home/node/binaryData
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      n8n:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "/usr/bin/wget --server-response --proxy off --no-verbose --tries=1 --timeout=3 ${N8N_WORKER_SERVER_ADDRESS}:${N8N_WORKER_HEALTH_CHECK_PORT}/healthz -O /dev/null 2>&1 | grep -q 'HTTP/1.1 200 OK'"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+
+  redis:
+    container_name: redis
+    image: redis:8-alpine
+    restart: always
+    environment:
+      REDIS_PORT: ${REDIS_PORT}
+      REDIS_ROOT_PASSWORD: ${REDIS_ROOT_PASSWORD}
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --requirepass ${REDIS_ROOT_PASSWORD} --port ${REDIS_PORT}
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a ${REDIS_ROOT_PASSWORD} ping | grep PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  cloudflared:
+    container_name: cloudflared
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    environment:
+      CLOUDFLARED_TUNNEL_TOKEN: ${CLOUDFLARED_TUNNEL_TOKEN}
+    command: tunnel --metrics 0.0.0.0:2000 --no-autoupdate run --token ${CLOUDFLARED_TUNNEL_TOKEN} 
+    depends_on:
+      n8n:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "cloudflared", "--metrics", "localhost:2000", "tunnel", "ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
